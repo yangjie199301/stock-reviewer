@@ -1,0 +1,40 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+*.so
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+.env/
+*.venv
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Project specific ---
+.history/
+quant_data.db
+*.csv
+*.xlsx
+
+# --- Logs ---
+logs/
+*.log
+
+# --- OS ---
+Thumbs.db
+Desktop.ini
