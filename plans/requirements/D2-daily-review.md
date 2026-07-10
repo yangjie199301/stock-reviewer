@@ -1,6 +1,7 @@
-# D1 — 每日复盘
+# D2 — 每日复盘
 
 > 需求总览索引：[requirements.md](requirements.md)
+> 前置依赖：[D1 — 数据管理](D1-data-management.md)
 
 ---
 
