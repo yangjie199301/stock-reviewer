@@ -12,7 +12,7 @@ from typing import List
 @dataclass
 class Settings:
     # ── 数据库 ──
-    db_path: str = os.getenv("DB_PATH", "quant_data.db")
+    db_path: str = os.getenv("DB_PATH", "data/quant_data.db")
 
     # ── 股票池 ──
     stock_pool: List[str] = field(default_factory=lambda: [])  # 空 = 全市场

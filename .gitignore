@@ -25,6 +25,8 @@ env/
 *~
 .DS_Store
 
+data/
+
 # --- Project specific ---
 .history/
 quant_data.db
