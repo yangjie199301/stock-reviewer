@@ -1,28 +1,27 @@
 """通达信数据导入器。
 
-将通达信导出的 CSV/TXT 文件解析后写入 SQLite 数据库。
+支持两种数据来源：
+  1. 通达信日线数据完整包（.day 二进制格式）— 推荐
+     下载地址：https://data.tdx.com.cn/vipdoc/hsjday.zip
+     解压后将 hsjday/ 目录放入 data/imports/ 即可
 
-支持的文件格式（CSV，UTF-8/GBK 编码）：
-  - 批量导出格式（推荐）：
-    代码,名称,日期,开盘,最高,最低,收盘,成交量,成交额
-    000001,平安银行,2026-07-01,12.34,12.56,12.20,12.45,12345678,156789000
-
-  - 单只股票格式（来自个股 K 线导出）：
-    日期,开盘,最高,最低,收盘,成交量,成交额
-    2026-07-01,12.34,12.56,12.20,12.45,12345678,156789000
+  2. 通达信导出的 CSV/TXT 文件
+     支持批量导出格式（含代码列）和单只股票格式
 
 使用方式：
     from stock_reviewer.infrastructure.adapters.tdx_importer import TdxImporter
     importer = TdxImporter()
-    result = importer.import_all()          # 扫描默认目录 data/imports/
+    result = importer.import_all()          # 扫描 data/imports/ 目录
     result = importer.import_file("path")   # 导入单个文件
 """
 
 import csv
 import os
+import struct
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
+
 from stock_reviewer.core.logging import logger
 from stock_reviewer.domain.entities.models import DailyQuote
 from stock_reviewer.infrastructure.database.repositories.sqlite_repositories import (
@@ -30,9 +29,17 @@ from stock_reviewer.infrastructure.database.repositories.sqlite_repositories imp
     SqliteDataMetaRepository,
 )
 
+# ── .day 二进制文件格式 ──────────────────────────────────
+# 每条记录 32 字节，8 个 int32 little-endian：
+#   date(int)  open*100(int)  high*100(int)  low*100(int)
+#   close*100(int)  amount(int)  volume(int)  reserved(int)
+_DAY_RECORD_SIZE = 32
+_DAY_STRUCT = struct.Struct("<iiiiiiii")  # 8 个 int32 LE
 
-# 通达信导出的列名映射（标准名 → DailyQuote 字段）
-# 支持中英文列名
+# 文件名前缀 → 交易所
+_EXCHANGE_PREFIX = {"sh": "sh", "sz": "sz", "bj": "bj"}
+
+# ── CSV 列名映射 ────────────────────────────────────────
 _COLUMN_ALIASES: dict = {
     "代码": "code",
     "code": "code",
@@ -73,7 +80,9 @@ class TdxImporter:
         self.quote_repo = SqliteDailyQuoteRepository()
         self.meta_repo = SqliteDataMetaRepository()
 
-    # ── 公共 API ──
+    # ══════════════════════════════════════════════════════
+    # 公共 API
+    # ══════════════════════════════════════════════════════
 
     def import_all(self) -> dict:
         """扫描导入目录，导入所有文件。
@@ -85,12 +94,13 @@ class TdxImporter:
             logger.warning("导入目录不存在: %s", self.import_dir)
             return {"total_files": 0, "imported": 0, "skipped": 0, "failed": []}
 
-        files = sorted(self.import_dir.glob("*.csv")) + sorted(
-            self.import_dir.glob("*.txt")
-        )
+        # 收集所有可导入文件
+        files = self._collect_files()
         if not files:
-            logger.warning("导入目录中无 CSV/TXT 文件: %s", self.import_dir)
+            logger.info("导入目录中无可导入文件: %s", self.import_dir)
             return {"total_files": 0, "imported": 0, "skipped": 0, "failed": []}
+
+        logger.info("发现 %d 个可导入文件", len(files))
 
         result = {"total_files": len(files), "imported": 0, "skipped": 0, "failed": []}
         for file_path in files:
@@ -102,7 +112,7 @@ class TdxImporter:
                     result["skipped"] += 1
             except Exception as e:
                 logger.error("导入文件失败 %s: %s", file_path.name, e)
-                result["failed"].append(file_path.name)
+                result["failed"].append(str(file_path.relative_to(self.import_dir)))
 
         logger.info(
             "导入完成: %d 文件, %d 条记录, %d 跳过, %d 失败",
@@ -124,11 +134,57 @@ class TdxImporter:
         """
         return self._import_single_file(Path(file_path))
 
-    # ── 内部方法 ──
+    # ══════════════════════════════════════════════════════
+    # 文件收集
+    # ══════════════════════════════════════════════════════
+
+    def _collect_files(self) -> List[Path]:
+        """递归扫描导入目录，收集所有可导入文件。"""
+        # .day 文件在 hsjday/sh/lday/ 或 hsjday/sz/lday/ 等子目录下
+        if (self.import_dir / "sh" / "lday").exists():
+            # 直接是 vipdoc 结构
+            base = self.import_dir
+        elif (self.import_dir / "hsjday" / "sh" / "lday").exists():
+            # 是 hsjday 压缩包解压后的结构
+            base = self.import_dir / "hsjday"
+        else:
+            base = self.import_dir
+
+        files: List[Path] = []
+
+        # 扫描 .day 文件（递归）
+        for pattern in ("**/*.day",):
+            for f in sorted(base.glob(pattern)):
+                if self._is_valid_day_file(f):
+                    files.append(f)
+
+        # 扫描 CSV/TXT 文件（仅顶层目录）
+        for pattern in ("*.csv", "*.txt"):
+            for f in sorted(self.import_dir.glob(pattern)):
+                if f not in files:
+                    files.append(f)
+
+        return files
+
+    def _is_valid_day_file(self, path: Path) -> bool:
+        """检查文件名是否为有效的通达信日线格式。"""
+        name = path.stem  # 去掉 .day 后缀
+        if len(name) < 8:
+            return False
+        prefix = name[:2].lower()
+        return prefix in _EXCHANGE_PREFIX and name[2:].isdigit()
+
+    # ══════════════════════════════════════════════════════
+    # 导入单文件
+    # ══════════════════════════════════════════════════════
 
     def _import_single_file(self, file_path: Path) -> int:
         """导入单个文件并写入数据库。"""
-        records = self._parse_file(file_path)
+        if file_path.suffix.lower() == ".day":
+            records = self._parse_day_file(file_path)
+        else:
+            records = self._parse_csv_file(file_path)
+
         if not records:
             return 0
 
@@ -141,26 +197,98 @@ class TdxImporter:
         )
         return written
 
-    def _parse_file(self, file_path: Path) -> List[DailyQuote]:
-        """解析文件内容为 DailyQuote 列表。"""
-        # 尝试 UTF-8，失败则用 GBK
-        lines = self._read_lines(file_path)
+    # ══════════════════════════════════════════════════════
+    # .day 二进制解析
+    # ══════════════════════════════════════════════════════
+
+    def _parse_day_file(self, file_path: Path) -> List[DailyQuote]:
+        """解析通达信 .day 日线二进制文件。"""
+        code = self._extract_code_from_filename(file_path.stem)
+        if not code:
+            return []
+
+        try:
+            data = file_path.read_bytes()
+        except OSError as e:
+            logger.error("读取 .day 文件失败 %s: %s", file_path.name, e)
+            return []
+
+        records: List[DailyQuote] = []
+        pos = 0
+        while pos + _DAY_RECORD_SIZE <= len(data):
+            try:
+                raw = _DAY_STRUCT.unpack_from(data, pos)
+            except struct.error as e:
+                logger.warning("解析 .day 记录失败 %s @ %d: %s", file_path.name, pos, e)
+                break
+
+            date_int, open100, high100, low100, close100, amount, volume, _ = raw
+
+            # 校验
+            if date_int < 19900101 or date_int > 21000101:
+                pos += _DAY_RECORD_SIZE
+                continue
+            if any(v <= 0 for v in (open100, high100, low100, close100)):
+                pos += _DAY_RECORD_SIZE
+                continue
+
+            try:
+                parsed_date = datetime.strptime(str(date_int), "%Y%m%d").date()
+            except ValueError:
+                pos += _DAY_RECORD_SIZE
+                continue
+
+            records.append(
+                DailyQuote(
+                    code=code,
+                    name="",
+                    date=parsed_date,
+                    open=open100 / 100.0,
+                    high=high100 / 100.0,
+                    low=low100 / 100.0,
+                    close=close100 / 100.0,
+                    volume=volume,
+                    amount=float(amount),
+                    change_pct=0.0,
+                    turnover_rate=0.0,
+                )
+            )
+            pos += _DAY_RECORD_SIZE
+
+        return records
+
+    def _extract_code_from_filename(self, stem: str) -> str:
+        """从文件名提取股票代码。
+
+        sh600001.day → 600001
+        sz000001.day → 000001
+        """
+        prefix = stem[:2].lower()
+        if prefix not in _EXCHANGE_PREFIX:
+            return ""
+        return stem[2:].zfill(6)
+
+    # ══════════════════════════════════════════════════════
+    # CSV 解析
+    # ══════════════════════════════════════════════════════
+
+    def _parse_csv_file(self, file_path: Path) -> List[DailyQuote]:
+        """解析 CSV 文件为 DailyQuote 列表。"""
+        lines = self._read_csv_lines(file_path)
         if not lines:
             return []
 
-        # 解析表头
-        header = [h.strip().strip("\ufeff") for h in lines[0]]  # 去掉 BOM
-        col_map = self._map_columns(header)
+        header = [h.strip().strip("\ufeff") for h in lines[0]]
+        col_map = self._map_csv_columns(header)
         if not col_map:
-            logger.warning("无法识别文件列名: %s (%s)", file_path.name, header)
+            logger.warning("无法识别 CSV 列名: %s (%s)", file_path.name, header)
             return []
 
         has_code_col = "code" in col_map
         records: List[DailyQuote] = []
-
         for row in lines[1:]:
             try:
-                record = self._row_to_daily_quote(row, col_map, has_code_col)
+                record = self._csv_row_to_daily_quote(row, col_map, has_code_col)
                 if record:
                     records.append(record)
             except (ValueError, IndexError) as e:
@@ -169,34 +297,24 @@ class TdxImporter:
 
         return records
 
-    def _read_lines(self, file_path: Path) -> List[List[str]]:
-        """读取文件并返回 CSV 行列表。"""
+    def _read_csv_lines(self, file_path: Path) -> List[List[str]]:
+        """读取 CSV 行列表，自动检测编码。"""
         if not file_path.exists():
             logger.warning("文件不存在: %s", file_path)
             return []
 
-        try:
-            with open(file_path, encoding="utf-8-sig") as f:
-                reader = csv.reader(f)
-                return [row for row in reader if row and row[0].strip()]
-        except UnicodeDecodeError:
+        for encoding in ("utf-8-sig", "gbk", "gb18030"):
             try:
-                with open(file_path, encoding="gbk") as f:
+                with open(file_path, encoding=encoding) as f:
                     reader = csv.reader(f)
                     return [row for row in reader if row and row[0].strip()]
-            except Exception as e:
-                logger.error("无法读取文件 %s: %s", file_path.name, e)
-                return []
-        except Exception as e:
-            logger.error("无法读取文件 %s: %s", file_path.name, e)
-            return []
+            except (UnicodeDecodeError, OSError):
+                continue
+        logger.error("无法读取文件 %s（所有编码尝试失败）", file_path.name)
+        return []
 
-    def _map_columns(self, header: List[str]) -> dict:
-        """将文件列名映射为 DailyQuote 字段。
-
-        Returns:
-            {字段名: 列索引} 的映射字典，无法识别时返回空 dict。
-        """
+    def _map_csv_columns(self, header: List[str]) -> dict:
+        """将 CSV 列名映射为 DailyQuote 字段。"""
         col_map: dict = {}
         for idx, col_name in enumerate(header):
             col_lower = col_name.strip().lower()
@@ -206,29 +324,29 @@ class TdxImporter:
             if mapped:
                 col_map[mapped] = idx
 
-        # 必须有的字段
         required = ("date", "open", "high", "low", "close", "volume", "amount")
         missing = [r for r in required if r not in col_map]
         if missing:
-            logger.warning("缺少必要字段: %s", missing)
+            logger.warning("CSV 缺少必要字段: %s", missing)
             return {}
         return col_map
 
-    def _row_to_daily_quote(
+    def _csv_row_to_daily_quote(
         self, row: List[str], col_map: dict, has_code_col: bool
     ) -> Optional[DailyQuote]:
         """将一行 CSV 数据解析为 DailyQuote。"""
         try:
             code = row[col_map["code"]].strip().zfill(6) if has_code_col else ""
 
-            raw_date = row[col_map["date"]].strip()
-            parsed_date = self._parse_date(raw_date)
+            parsed_date = self._parse_date_str(row[col_map["date"]].strip())
             if not parsed_date:
                 return None
 
             return DailyQuote(
                 code=code,
-                name=row[col_map.get("name", -1)].strip() if "name" in col_map else "",
+                name=row[col_map.get("name", -1)].strip()
+                if "name" in col_map
+                else "",
                 date=parsed_date,
                 open=float(row[col_map["open"]]),
                 high=float(row[col_map["high"]]),
@@ -244,23 +362,16 @@ class TdxImporter:
                 else 0.0,
             )
         except (ValueError, IndexError) as e:
-            logger.debug("解析行失败: %s", e)
+            logger.debug("解析 CSV 行失败: %s", e)
             return None
 
-    def _parse_date(self, raw: str) -> Optional[date]:
-        """尝试多种格式解析日期。"""
-        formats = [
-            "%Y-%m-%d",
-            "%Y/%m/%d",
-            "%Y%m%d",
-            "%Y.%m.%d",
-        ]
-        for fmt in formats:
+    def _parse_date_str(self, raw: str) -> Optional[date]:
+        """尝试多种格式解析日期字符串。"""
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%Y.%m.%d"):
             try:
                 return datetime.strptime(raw, fmt).date()
             except ValueError:
                 continue
-        logger.debug("无法解析日期: %s", raw)
         return None
 
 
@@ -268,3 +379,40 @@ def run_import(import_dir: Optional[str] = None) -> dict:
     """便捷入口：创建导入器并运行。"""
     importer = TdxImporter(import_dir)
     return importer.import_all()
+
+
+def download_latest_data(target_dir: Optional[str] = None) -> bool:
+    """下载通达信最新日线数据包并解压到导入目录。
+
+    Args:
+        target_dir: 解压目标目录，默认 data/imports/。
+
+    Returns:
+        是否成功。
+    """
+    import urllib.request
+    import zipfile
+
+    target = Path(target_dir or "data/imports")
+    target.mkdir(parents=True, exist_ok=True)
+
+    url = "https://data.tdx.com.cn/vipdoc/hsjday.zip"
+    zip_path = target / "hsjday.zip"
+
+    logger.info("正在下载日线数据包: %s ...", url)
+    try:
+        urllib.request.urlretrieve(url, zip_path)
+    except Exception as e:
+        logger.error("下载失败: %s", e)
+        return False
+
+    logger.info("下载完成，正在解压...")
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(target)
+        zip_path.unlink()
+        logger.info("解压完成，已删除临时 zip 文件")
+        return True
+    except Exception as e:
+        logger.error("解压失败: %s", e)
+        return False
