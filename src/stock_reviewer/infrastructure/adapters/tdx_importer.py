@@ -226,6 +226,10 @@ class TdxImporter:
 
             date_int, open100, high100, low100, close100, amount, volume, _ = raw
 
+            # 成交量 int32 溢出处理（指数类成交量巨大）
+            if volume < 0:
+                volume += 2**32
+
             # 校验
             if date_int < 19900101 or date_int > 21000101:
                 pos += _DAY_RECORD_SIZE
