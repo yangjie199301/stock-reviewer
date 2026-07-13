@@ -16,7 +16,6 @@
 """
 
 import csv
-import os
 import struct
 from datetime import date, datetime
 from pathlib import Path
@@ -379,40 +378,3 @@ def run_import(import_dir: Optional[str] = None) -> dict:
     """便捷入口：创建导入器并运行。"""
     importer = TdxImporter(import_dir)
     return importer.import_all()
-
-
-def download_latest_data(target_dir: Optional[str] = None) -> bool:
-    """下载通达信最新日线数据包并解压到导入目录。
-
-    Args:
-        target_dir: 解压目标目录，默认 data/imports/。
-
-    Returns:
-        是否成功。
-    """
-    import urllib.request
-    import zipfile
-
-    target = Path(target_dir or "data/imports")
-    target.mkdir(parents=True, exist_ok=True)
-
-    url = "https://data.tdx.com.cn/vipdoc/hsjday.zip"
-    zip_path = target / "hsjday.zip"
-
-    logger.info("正在下载日线数据包: %s ...", url)
-    try:
-        urllib.request.urlretrieve(url, zip_path)
-    except Exception as e:
-        logger.error("下载失败: %s", e)
-        return False
-
-    logger.info("下载完成，正在解压...")
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(target)
-        zip_path.unlink()
-        logger.info("解压完成，已删除临时 zip 文件")
-        return True
-    except Exception as e:
-        logger.error("解压失败: %s", e)
-        return False
