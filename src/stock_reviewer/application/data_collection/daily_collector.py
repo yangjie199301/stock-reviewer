@@ -1,6 +1,7 @@
 """每日数据采集编排器。
 
-按顺序采集各类数据，每步独立 try-except，单步失败不影响后续。
+当前版本：在线采集未启用（akshare 接口暂不可用）。
+保留类和方法签名，后续迭代恢复。
 """
 
 from datetime import date, timedelta
@@ -21,15 +22,14 @@ from stock_reviewer.infrastructure.external_services import akshare_client
 
 
 class DailyCollector:
-    """每日数据采集编排器。"""
+    """每日数据采集编排器（当前版本未启用）。"""
 
     def __init__(self) -> None:
-        self.quote_repo = SqliteDailyQuoteRepository()
-        self.lhb_repo = SqliteLHBRepository()
-        self.fund_flow_repo = SqliteFundFlowRepository()
-        self.north_fund_repo = SqliteNorthFundRepository()
-        self.board_repo = SqliteBoardDailyRepository()
-        self.meta_repo = SqliteDataMetaRepository()
+        raise NotImplementedError(
+            "在线采集暂未启用，请使用通达信导入模式:\n"
+            "  from stock_reviewer.infrastructure.adapters.tdx_importer import TdxImporter\n"
+            "  TdxImporter().import_all()"
+        )
 
     def collect_all(self, trade_date: date) -> dict:
         """采集指定交易日所有数据。
