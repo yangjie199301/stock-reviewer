@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from stock_reviewer.core.logging import logger
+
+# 项目根目录
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 from stock_reviewer.domain.entities.models import DailyQuote
 from stock_reviewer.infrastructure.database.repositories.sqlite_repositories import (
     SqliteDailyQuoteRepository,
@@ -75,7 +78,7 @@ class TdxImporter:
     """通达信数据导入器。"""
 
     def __init__(self, import_dir: Optional[str] = None):
-        self.import_dir = Path(import_dir or "data/imports")
+        self.import_dir = Path(import_dir or str(_PROJECT_ROOT / "data" / "imports"))
         self.quote_repo = SqliteDailyQuoteRepository()
         self.meta_repo = SqliteDataMetaRepository()
 

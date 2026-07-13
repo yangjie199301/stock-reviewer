@@ -27,6 +27,7 @@ class SqliteDailyQuoteRepository:
         conn = get_connection()
         count = 0
         for r in records:
+            before = conn.total_changes
             conn.execute(
                 """INSERT OR IGNORE INTO daily_quotes
                    (code, name, date, open, high, low, close, volume, amount, change_pct, turnover_rate)
@@ -34,7 +35,8 @@ class SqliteDailyQuoteRepository:
                 (r.code, r.name, r.date.isoformat(), r.open, r.high, r.low,
                  r.close, r.volume, r.amount, r.change_pct, r.turnover_rate),
             )
-            count += conn.total_changes
+            if conn.total_changes > before:
+                count += 1
         conn.commit()
         return count
 
