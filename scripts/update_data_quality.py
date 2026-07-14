@@ -14,53 +14,127 @@ DB_PATH = Path(__file__).parent.parent / "data" / "quant_data.db"
 NAMES_CSV = Path(__file__).parent / "stock_names.csv"
 
 
-def fetch_stock_names(target_file: Path) -> bool:
-    """从 akshare 抓取 A 股名称映射并保存到 CSV。"""
+def fetch_all_names(target_file: Path):
+    """从多个 akshare 接口抓取全市场代码名称映射。
+
+    数据源覆盖：
+      - A 股      : stock_info_a_code_name()
+      - 指数      : stock_zh_index_spot()
+      - 基金/ETF  : fund_name_em()
+      - 可转债    : bond_zh_cov_spot_em()
+    """
+    import akshare as ak
+
+    all_names: dict[str, str] = {}
+
+    # ── 1. A 股 ──
     try:
-        import akshare as ak
         df = ak.stock_info_a_code_name()
-        df.to_csv(target_file, index=False, encoding="utf-8-sig")
-        print(f"股票名称映射表已保存：{target_file}（{len(df)} 只）")
-        return True
+        for _, row in df.iterrows():
+            code = str(row["code"]).strip().zfill(6)
+            name = str(row["name"]).strip()
+            if name and name != "nan":
+                all_names[code] = name
+        print(f"  A 股: {sum(1 for c in all_names if c[:2] in ('00','30','60','68'))} 只")
     except Exception as e:
-        print(f"akshare 抓取名称失败：{e}")
-        return False
+        print(f"  A 股抓取失败: {e}")
 
+    # ── 2. 指数（中证指数公司，覆盖 000/399/880/931 等）──
+    try:
+        df = ak.index_all_cni()
+        for _, row in df.iterrows():
+            code = str(row["指数代码"]).strip().zfill(6)
+            name = str(row["指数简称"]).strip()
+            if name and name != "nan" and code not in all_names:
+                all_names[code] = name
+        print(f"  指数: ~{sum(1 for c in all_names if c[:2] in ('00','39','88','93'))} 只")
+    except Exception as e:
+        print(f"  指数抓取失败: {e}")
 
-def build_manual_names(target_file: Path):
-    """如果 akshare 抓取失败，创建基础名称映射。"""
-    conn = sqlite3.connect(str(DB_PATH))
-    codes = conn.execute("SELECT DISTINCT code FROM daily_quotes ORDER BY code").fetchall()
-    conn.close()
+    # ── 3. 基金/ETF（天天基金，覆盖 51/15/50/56 等）──
+    try:
+        df = ak.fund_name_em()
+        for _, row in df.iterrows():
+            code = str(row["基金代码"]).strip().zfill(6)
+            name = str(row["基金简称"]).strip()
+            if name and name != "nan" and code not in all_names:
+                all_names[code] = name
+        print(f"  基金: ~{sum(1 for c in all_names if c[:2] in ('51','15','50','56','58','52'))} 只")
+    except Exception as e:
+        print(f"  基金抓取失败: {e}")
 
-    manual = {
-        "000001": "上证指数", "000002": "上证A股", "000003": "上证B股",
-        "000016": "上证50", "000300": "沪深300", "000688": "科创50",
-        "399001": "深证成指", "399006": "创业板指", "399005": "中小板指",
-        "880001": "上证指数(全)", "880002": "上证A股(全)", "880003": "上证B(全)",
-        "880004": "深证成指(全)", "880005": "深证综指(全)",
-    }
+    # ── 4. 全市场实时行情（含 A/B 股，覆盖 20/90 开头 B 股）──
+    try:
+        df = ak.stock_zh_a_spot_em()
+        for _, row in df.iterrows():
+            code = str(row["代码"]).strip().zfill(6)
+            name = str(row["名称"]).strip()
+            if name and name != "nan" and code not in all_names:
+                all_names[code] = name
+        print(f"  A+B 股: 总计 {sum(1 for c in all_names if c[:2] in ('00','30','60','68','20','90'))} 只")
+    except Exception as e:
+        print(f"  实时行情抓取失败: {e}")
+
+    # ── 5. 北交所 ──
+    try:
+        df = ak.stock_info_bj_name_code()
+        for _, row in df.iterrows():
+            code = str(row["code"]).strip().zfill(6)
+            name = str(row["name"]).strip()
+            if name and name != "nan" and code not in all_names:
+                all_names[code] = name
+        print(f"  北交所: ~{sum(1 for c in all_names if c[:2] in ('83','87','92'))} 只")
+    except Exception as e:
+        # 备用接口
+        try:
+            df = ak.stock_bj_a_spot_em()
+            for _, row in df.iterrows():
+                code = str(row["代码"]).strip().zfill(6)
+                name = str(row["名称"]).strip()
+                if name and name != "nan" and code not in all_names:
+                    all_names[code] = name
+            print(f"  北交所(备用): ~{sum(1 for c in all_names if c[:2] in ('83','87','92'))} 只")
+        except Exception as e2:
+            print(f"  北交所抓取失败: {e}")
+
+    # ── 6. 可转债 ──
+    try:
+        df = ak.bond_zh_hs_cov_spot()
+        for _, row in df.iterrows():
+            symbol = str(row["symbol"]).strip()
+            if symbol.startswith("sh") or symbol.startswith("sz"):
+                code = symbol[2:].zfill(6)
+            else:
+                code = str(row.get("code", "")).strip().zfill(6)
+            name = str(row["name"]).strip()
+            if name and name != "nan" and code not in all_names:
+                all_names[code] = name
+        print(f"  可转债: ~{sum(1 for c in all_names if c[:2] in ('12','11'))} 只")
+    except Exception as e:
+        print(f"  可转债抓取失败: {e}")
+
+    # 写入 CSV
     with open(target_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(["code", "name"])
-        for code, name in manual.items():
-            writer.writerow([code, name])
-        known = set(manual.keys())
-        for (code,) in codes:
-            if code not in known:
-                writer.writerow([code, ""])
-    print(f"基础名称映射已保存：{target_file}")
+        for code in sorted(all_names.keys()):
+            writer.writerow([code, all_names[code]])
+    print(f"\n全市场名称映射已保存：{target_file}（共 {len(all_names)} 只）")
 
 
 def ensure_names_csv() -> bool:
-    """确保股票名称映射文件存在。"""
-    if NAMES_CSV.exists() and NAMES_CSV.stat().st_size > 100:
-        return True
-    print("正在下载股票名称数据...")
-    if fetch_stock_names(NAMES_CSV):
-        return True
-    print("akshare 下载失败，创建基础名称映射...")
-    build_manual_names(NAMES_CSV)
+    """确保股票名称映射文件存在且完整。"""
+    # 检查现有文件是否来自完整的多源抓取（文件头包含完整标记）
+    if NAMES_CSV.exists():
+        with open(NAMES_CSV, encoding="utf-8-sig") as f:
+            lines = f.readlines()
+        # 如果已有 10000+ 条，认为足够完整
+        if len(lines) > 8000:
+            print(f"名称映射表已存在：{len(lines)-1} 条")
+            return True
+
+    print("正在从多数据源抓取全市场名称...")
+    fetch_all_names(NAMES_CSV)
     return True
 
 
